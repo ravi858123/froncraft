@@ -1,5 +1,5 @@
 """
-Font Text Exporter
+FontCraft
 ------------------
 Een kleine Windows-desktopapp waarmee je een eigen lettertype (TTF/OTF)
 kunt uploaden, tekst kunt typen in dat lettertype, en het resultaat kunt
@@ -27,9 +27,21 @@ except Exception:
     REPORTLAB_OK = False
 
 
-APP_TITLE = "Font Text Exporter"
+APP_TITLE = "FontCraft"
 PADDING = 24
 PX_TO_PT = 72.0 / 96.0  # omrekening van pixels (96 dpi scherm) naar PDF-punten
+
+# Hoeveel keer groter er intern gerenderd wordt voordat er (met hoogwaardige
+# LANCZOS-filtering) teruggeschaald wordt. Dit "supersamplen" zorgt voor
+# veel vloeiendere letterranden dan direct op de doelgrootte renderen.
+SUPERSAMPLE_FACTOR = 4
+
+# Beschikbare exportresoluties: label -> (schaalfactor, dpi-metadata)
+QUALITY_PRESETS = {
+    "Standaard (scherm, 1x)": (1, 96),
+    "Hoog (2x)": (2, 192),
+    "Zeer hoog (print, 4x)": (4, 384),
+}
 
 
 def hex_to_rgb(hex_color: str):
@@ -67,7 +79,7 @@ class FontManager:
         return self.fonts.get(name)
 
 
-class FontTextExporterApp:
+class FontCraftApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(APP_TITLE)
@@ -112,6 +124,14 @@ class FontTextExporterApp:
         )
         size_spin.grid(row=0, column=3)
         size_spin.bind("<KeyRelease>", lambda e: self.update_preview())
+
+        ttk.Label(font_frame, text="Exportkwaliteit:").grid(row=0, column=4, padx=(10, 4))
+        self.quality_var = tk.StringVar(value=list(QUALITY_PRESETS.keys())[1])
+        quality_combo = ttk.Combobox(
+            font_frame, textvariable=self.quality_var, state="readonly",
+            values=list(QUALITY_PRESETS.keys()), width=20,
+        )
+        quality_combo.grid(row=0, column=5)
 
         # -- Kleuren -------------------------------------------------------
         color_frame = ttk.Frame(font_frame)
@@ -208,13 +228,33 @@ class FontTextExporterApp:
     def _get_text(self):
         return self.text_box.get("1.0", "end-1c")
 
-    def render_image(self) -> Image.Image:
+    def _selected_quality(self):
+        label = self.quality_var.get()
+        return QUALITY_PRESETS.get(label, (1, 96))
+
+    def render_image(self, scale: int = 1, high_quality: bool = False) -> Image.Image:
+        """Rendert de tekst naar een PIL-afbeelding.
+
+        scale: extra vergrotingsfactor voor hogere resolutie-exports
+               (1x/2x/4x, zie QUALITY_PRESETS).
+        high_quality: rendert intern op SUPERSAMPLE_FACTOR keer de
+               doelresolutie en schaalt daarna met LANCZOS terug. Dit
+               geeft veel vloeiendere, scherpere letterranden dan direct
+               op de doelgrootte renderen (vergelijkbaar met anti-aliasing
+               in professionele ontwerpsoftware).
+        """
         font_path = self._current_font_path()
         if not font_path:
             raise ValueError("Upload eerst een lettertype (.ttf of .otf).")
 
+        supersample = SUPERSAMPLE_FACTOR if high_quality else 1
+        render_scale = max(1, scale) * supersample
+
         text = self._get_text() or " "
-        size = max(1, int(self.size_var.get()))
+        base_size = max(1, int(self.size_var.get()))
+        size = base_size * render_scale
+        padding = PADDING * render_scale
+
         pil_font = ImageFont.truetype(font_path, size)
 
         lines = text.split("\n") or [" "]
@@ -231,8 +271,8 @@ class FontTextExporterApp:
         max_width = max(widths) if widths else size
         total_height = line_height * len(lines)
 
-        width = max_width + PADDING * 2
-        height = total_height + PADDING * 2
+        width = max_width + padding * 2
+        height = total_height + padding * 2
 
         transparent = self.transparent_bg.get()
         mode = "RGBA"
@@ -241,16 +281,24 @@ class FontTextExporterApp:
         img = Image.new(mode, (max(width, 1), max(height, 1)), bg)
         draw = ImageDraw.Draw(img)
 
-        y = PADDING
+        y = padding
         for line in lines:
-            draw.text((PADDING, y), line, font=pil_font, fill=(*self.text_color, 255))
+            draw.text((padding, y), line, font=pil_font, fill=(*self.text_color, 255))
             y += line_height
+
+        if supersample > 1:
+            final_w = max(1, img.width // supersample)
+            final_h = max(1, img.height // supersample)
+            img = img.resize((final_w, final_h), Image.LANCZOS)
 
         return img
 
     def update_preview(self):
         try:
-            img = self.render_image()
+            # Voor de live preview gebruiken we scale=1 zonder supersampling
+            # (snel bij elke toetsaanslag); de export zelf gebeurt altijd
+            # in hoge kwaliteit, ongeacht wat de preview laat zien.
+            img = self.render_image(scale=1, high_quality=False)
         except Exception:
             return
 
@@ -315,16 +363,29 @@ class FontTextExporterApp:
         messagebox.showinfo(APP_TITLE, f"Opgeslagen als:\n{path}")
 
     def export_png(self, path):
-        img = self.render_image()
-        img.save(path, "PNG")
+        scale, dpi = self._selected_quality()
+        img = self.render_image(scale=scale, high_quality=True)
+        # PNG is sowieso verliesvrij; optimize=True comprimeert alleen
+        # het bestand kleiner zonder kwaliteitsverlies.
+        img.save(path, "PNG", optimize=True, dpi=(dpi, dpi))
 
     def export_jpeg(self, path):
-        img = self.render_image()
+        scale, dpi = self._selected_quality()
+        img = self.render_image(scale=scale, high_quality=True)
         if img.mode == "RGBA":
             bg = Image.new("RGB", img.size, self.bg_color if not self.transparent_bg.get() else (255, 255, 255))
             bg.paste(img, mask=img.split()[3])
             img = bg
-        img.save(path, "JPEG", quality=95)
+        # quality=100 + subsampling=0 (4:4:4) voorkomt kleurvervaging rond
+        # scherpe randen van letters, wat bij lagere JPEG-instellingen
+        # vaak "wazige" tekst veroorzaakt.
+        img.save(
+            path, "JPEG",
+            quality=100,
+            subsampling=0,
+            optimize=True,
+            dpi=(dpi, dpi),
+        )
 
     def export_svg(self, path):
         font_path = self._current_font_path()
@@ -437,7 +498,7 @@ text {{
 
 def main():
     root = tk.Tk()
-    app = FontTextExporterApp(root)
+    app = FontCraftApp(root)
     root.after(200, app.update_preview)
     root.bind("<Configure>", lambda e: app.update_preview())
     root.mainloop()

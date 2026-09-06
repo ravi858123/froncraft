@@ -1,4 +1,4 @@
-# Font Text Exporter
+# FontCraft
 
 Een kleine Windows-app waarmee je:
 
@@ -17,10 +17,10 @@ python app.py
 
 ```bash
 pip install -r requirements.txt
-pyinstaller --noconfirm --onefile --windowed --name "FontTextExporter" app.py
+pyinstaller --noconfirm --onefile --windowed --name "FontCraft" app.py
 ```
 
-De exe komt te staan in de map `dist/FontTextExporter.exe`.
+De exe komt te staan in de map `dist/FontCraft.exe`.
 
 ## Automatisch bouwen via GitHub Actions
 
@@ -41,7 +41,7 @@ GitHub pusht, bouwt GitHub Actions automatisch een Windows `.exe`:
    ```bash
    git init
    git add .
-   git commit -m "Eerste versie van Font Text Exporter"
+   git commit -m "Eerste versie van FontCraft"
    git branch -M main
    git remote add origin https://github.com/<jouw-gebruikersnaam>/<repo-naam>.git
    git push -u origin main
